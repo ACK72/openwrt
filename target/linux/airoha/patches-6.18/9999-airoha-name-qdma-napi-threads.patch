@@ -1,0 +1,93 @@
+Subject: [PATCH] net: airoha: name NAPI threads through the network core
+
+diff --git a/include/linux/netdevice.h b/include/linux/netdevice.h
+--- a/include/linux/netdevice.h
++++ b/include/linux/netdevice.h
+@@ -2795,6 +2795,8 @@
+  */
+ #define NAPI_POLL_WEIGHT 64
+ 
++void netif_napi_set_thread_name(struct napi_struct *napi, const char *name);
++
+ void netif_napi_add_weight_locked(struct net_device *dev,
+ 				  struct napi_struct *napi,
+ 				  int (*poll)(struct napi_struct *, int),
+diff --git a/net/core/dev.c b/net/core/dev.c
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -7519,6 +7519,27 @@
+ }
+ EXPORT_SYMBOL(netif_napi_add_weight_locked);
+ 
++/**
++ * netif_napi_set_thread_name - name an existing NAPI kernel thread
++ * @napi: initialized NAPI context
++ * @name: thread name, truncated to TASK_COMM_LEN - 1 characters
++ *
++ * Call in process context without the netdev lock held. The caller must
++ * keep the NAPI context alive. The device lock protects the thread against
++ * concurrent NAPI thread removal. Non-threaded NAPI is left unchanged.
++ */
++void netif_napi_set_thread_name(struct napi_struct *napi, const char *name)
++{
++	char comm[TASK_COMM_LEN];
++
++	strscpy(comm, name, sizeof(comm));
++	netdev_lock(napi->dev);
++	if (napi->thread)
++		set_task_comm(napi->thread, comm);
++	netdev_unlock(napi->dev);
++}
++EXPORT_SYMBOL_GPL(netif_napi_set_thread_name);
++
+ void napi_disable_locked(struct napi_struct *n)
+ {
+ 	unsigned long val, new;
+diff --git a/drivers/net/ethernet/airoha/airoha_eth.c b/drivers/net/ethernet/airoha/airoha_eth.c
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -7,6 +7,7 @@
+ #include <linux/of_net.h>
+ #include <linux/of_reserved_mem.h>
+ #include <linux/platform_device.h>
++#include <linux/sched.h>
+ #include <linux/tcp.h>
+ #include <linux/if_vlan.h>
+ #include <linux/pcs/pcs.h>
+@@ -1034,6 +1035,20 @@
+ 	return done;
+ }
+ 
++/* The shared dummy netdev gives every NAPI thread the same default name.
++ * Expose the hardware QDMA/ring identity for userspace affinity policy.
++ * QDMA0 serves LAN devices and QDMA1 serves WAN devices.
++ */
++static void airoha_qdma_name_napi(struct airoha_qdma *qdma,
++				  struct napi_struct *napi, char type, int id)
++{
++	char name[TASK_COMM_LEN];
++	int qdma_id = qdma - qdma->eth->qdma;
++
++	snprintf(name, sizeof(name), "napi/qdma%d-%c%d", qdma_id, type, id);
++	netif_napi_set_thread_name(napi, name);
++}
++
+ static int airoha_qdma_init_rx_queue(struct airoha_queue *q,
+ 				     struct airoha_qdma *qdma, int ndesc)
+ {
+@@ -1077,6 +1092,7 @@
+ 	q->buf_size = lro_q ? pp_params.max_len : pp_params.max_len / 2;
+ 	q->ndesc = ndesc;
+ 	netif_napi_add(eth->napi_dev, &q->napi, airoha_qdma_rx_napi_poll);
++	airoha_qdma_name_napi(qdma, &q->napi, 'r', qid);
+ 
+ 	airoha_qdma_wr(qdma, REG_RX_RING_BASE(qid), dma_addr);
+ 	airoha_qdma_rmw(qdma, REG_RX_RING_SIZE(qid),
+@@ -1368,6 +1384,7 @@
+ 
+ 	netif_napi_add_tx(eth->napi_dev, &irq_q->napi,
+ 			  airoha_qdma_tx_napi_poll);
++	airoha_qdma_name_napi(qdma, &irq_q->napi, 't', id);
+ 
+ 	airoha_qdma_wr(qdma, REG_TX_IRQ_BASE(id), dma_addr);
+ 	airoha_qdma_rmw(qdma, REG_TX_IRQ_CFG(id), TX_IRQ_DEPTH_MASK,
