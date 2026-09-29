@@ -251,7 +251,7 @@ define DownloadMethod/rawgit
 		$(TAR) --numeric-owner --owner=0 --group=0 --ignore-failed-read -C $(SUBDIR) -f $(SUBDIR).tar.git -r .git .gitmodules 2>/dev/null \
 	) && \
 	rm -rf $(SUBDIR) && mkdir $(SUBDIR) && \
-	$(TAR) -C $(SUBDIR) -xf $(SUBDIR).tar.git && \
+	$(TAR) -C $(SUBDIR) --no-same-permissions -xf $(SUBDIR).tar.git && \
 	(cd $(SUBDIR) && $(if $(filter skip,$(SUBMODULES)),true,git submodule update --init --recursive -- $(SUBMODULES) && \
 	rm -rf .git .gitmodules)) && \
 	echo "Packing checkout..." && \
