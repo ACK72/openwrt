@@ -1,0 +1,22 @@
+From: ACK72 <ACK72@users.noreply.github.com>
+Subject: [PATCH] mt7996: keep AIR_TIME events within the station event bounds
+
+Upstream mt76 now bounds the ALL_STA and countdown events itself
+(56c8b4a4b407 and d17b8d5eff29), replacing the earlier adaptation of
+Gilly 026 and 044. Its ALL_STA element sizes omit the AIR_TIME tag added
+by the station statistics patch, so those events would be discarded.
+Size AIR_TIME entries like the other tags so airtime is still reported.
+Source: Gilly1970/Gemtek-W1700K-6.18 at 0aa0666de1366b69d5d73d98c19809affc1f76ed.
+
+--- a/mt7996/mcu.c
++++ b/mt7996/mcu.c
+@@ -928,6 +928,9 @@ mt7996_mcu_rx_all_sta_info_event(struct
+ 	case UNI_ALL_STA_TXRX_MSDU_COUNT:
+ 		elem_size = sizeof(res->msdu_cnt[0]);
+ 		break;
++	case UNI_ALL_STA_TXRX_AIR_TIME:
++		elem_size = sizeof(res->airtime[0]);
++		break;
+ 	default:
+ 		return;
+ 	}
