@@ -1,0 +1,89 @@
+From: ACK72 <ACK72@users.noreply.github.com>
+Subject: [PATCH] airoha: route RX no-CPU-descriptor interrupts to RX NAPI
+
+Port Gilly 980 onto the effective 6.18.55 stack. 980 was staged from
+netdev without a recorded author.
+Source: Gilly1970/Gemtek-W1700K-6.18 at 0aa0666de1366b69d5d73d98c19809affc1f76ed.
+
+The IRQ banks enable the RX no-CPU-descriptor interrupts through
+INT_RX1_MASK and INT_RX2_MASK, but the handler only disabled and
+dispatched the RX done bits, and RX NAPI re-enabled only those. Handle
+both, so a queue that ran out of descriptors is serviced by its NAPI.
+
+Gilly 949 and 957, which this patch carried before, are upstream as
+185 ("net: airoha: Fix error handling in airoha_ppe_flush_sram_entries()")
+and 188 ("net: airoha: fix BQL underflow in shared QDMA TX ring").
+
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -1011,19 +1011,22 @@
+ 
+ 	if (done < budget && napi_complete(napi)) {
+ 		struct airoha_qdma *qdma = q->qdma;
+ 		int i, qid = q - &qdma->q_rx[0];
+ 		int intr_reg = qid < RX_DONE_HIGH_OFFSET ? QDMA_INT_REG_IDX1
+ 							 : QDMA_INT_REG_IDX2;
++		u32 irq_id = qid % RX_DONE_HIGH_OFFSET;
++		u32 intr_mask = BIT(irq_id) |
++				BIT(irq_id + RX_NO_CPU_DSCP_LOW_OFFSET);
+ 
+ 		for (i = 0; i < ARRAY_SIZE(qdma->irq_banks); i++) {
+ 			if (!(BIT(qid) & RX_IRQ_BANK_PIN_MASK(i)))
+ 				continue;
+ 
+ 			airoha_qdma_irq_enable(&qdma->irq_banks[i], intr_reg,
+-					       BIT(qid % RX_DONE_HIGH_OFFSET));
++					       intr_mask);
+ 		}
+ 	}
+ 
+ 	return done;
+ }
+ 
+@@ -1704,22 +1707,25 @@
+ 		airoha_qdma_wr(qdma, REG_INT_STATUS(i), intr[i]);
+ 	}
+ 
+ 	if (!test_bit(DEV_STATE_INITIALIZED, &qdma->eth->state))
+ 		return IRQ_NONE;
+ 
+-	rx_intr1 = intr[1] & RX_DONE_LOW_INT_MASK;
++	rx_intr1 = intr[1] & (RX_DONE_LOW_INT_MASK | RX_NO_CPU_DSCP_LOW_INT_MASK);
+ 	if (rx_intr1) {
+ 		airoha_qdma_irq_disable(irq_bank, QDMA_INT_REG_IDX1, rx_intr1);
+-		rx_intr_mask |= rx_intr1;
++		rx_intr_mask |= (rx_intr1 & RX_DONE_LOW_INT_MASK) |
++				RX_NO_CPU_DSCP_INT_RX1_MASK(rx_intr1);
+ 	}
+ 
+-	rx_intr2 = intr[2] & RX_DONE_HIGH_INT_MASK;
++	rx_intr2 = intr[2] & (RX_DONE_HIGH_INT_MASK | RX_NO_CPU_DSCP_HIGH_INT_MASK);
+ 	if (rx_intr2) {
+ 		airoha_qdma_irq_disable(irq_bank, QDMA_INT_REG_IDX2, rx_intr2);
+-		rx_intr_mask |= (rx_intr2 << 16);
++		rx_intr_mask |= ((rx_intr2 & RX_DONE_HIGH_INT_MASK) <<
++				 RX_DONE_HIGH_OFFSET) |
++				(rx_intr2 & RX_NO_CPU_DSCP_HIGH_INT_MASK);
+ 	}
+ 
+ 	for (i = 0; rx_intr_mask && i < ARRAY_SIZE(qdma->q_rx); i++) {
+ 		if (!qdma->q_rx[i].ndesc)
+ 			continue;
+ 
+--- a/drivers/net/ethernet/airoha/airoha_regs.h
++++ b/drivers/net/ethernet/airoha/airoha_regs.h
+@@ -572,12 +572,14 @@
+ 	 RX1_DONE_INT_MASK | RX0_DONE_INT_MASK)
+ 
+ #define RX_NO_CPU_DSCP_LOW_OFFSET	__ffs(RX_NO_CPU_DSCP_LOW_INT_MASK)
+ #define INT_RX1_MASK(_n)							\
+ 	((((_n) << RX_NO_CPU_DSCP_LOW_OFFSET) & RX_NO_CPU_DSCP_LOW_INT_MASK) |	\
+ 	 (RX_DONE_LOW_INT_MASK & (_n)))
++#define RX_NO_CPU_DSCP_INT_RX1_MASK(_n)					\
++	(((_n) & RX_NO_CPU_DSCP_LOW_INT_MASK) >> RX_NO_CPU_DSCP_LOW_OFFSET)
+ 
+ /* QDMA_CSR_INT_ENABLE3 */
+ #define RX31_NO_CPU_DSCP_INT_MASK	BIT(31)
+ #define RX30_NO_CPU_DSCP_INT_MASK	BIT(30)
+ #define RX29_NO_CPU_DSCP_INT_MASK	BIT(29)
+ #define RX28_NO_CPU_DSCP_INT_MASK	BIT(28)
